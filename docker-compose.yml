@@ -1,0 +1,114 @@
+services:
+  # --------------------
+  # 1. Go Backend Service
+  # --------------------
+  go-backend:
+    container_name: dce-log-go-backend
+    build: 
+      context: .
+      dockerfile: Backend/Dockerfile.backend
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      # Example DSN for local MariaDB service
+      # format: user:password@tcp(host:port)/database?parseTime=true
+      - MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # ports:
+    #   - "8080:8080"
+    # Mount the host source code for Go (Optional: for live reload tools like Air, but not needed for this simple build)
+    # volumes:
+    #   - ./Backend:/app/Backend
+    networks:
+      - dce_network
+      
+  # --------------------
+  # 2. Frontend Web Service (Nginx)
+  # --------------------
+  web-frontend:
+    container_name: dce-log-web-frontend
+    build: 
+      context: .
+      dockerfile: Frontend/Dockerfile.frontend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/nginx-health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    ports:
+      - "3000:80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      - go-backend
+    networks:
+      - dce_network
+
+  # --------------------
+  # 3. MariaDB (Local Dev DB)
+  # --------------------
+  mariadb:
+    image: mariadb:11
+    container_name: dce-log-mariadb
+    restart: unless-stopped
+    environment:
+      - MARIADB_ROOT_PASSWORD=rootpassword
+      - MARIADB_DATABASE=dce_logs
+      - MARIADB_USER=dce_user
+      - MARIADB_PASSWORD=dce_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - dce_db:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 --silent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - dce_network
+
+  # --------------------
+  # 4. DB Migrations (runs then exits)
+  # --------------------
+  migrate:
+    image: migrate/migrate:4
+    container_name: dce-log-migrate
+    command: [
+      "-path", "/migrations",
+      "-database", "mysql://dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?multiStatements=true",
+      "up"
+    ]
+    volumes:
+      - ./db/migrations:/migrations:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - dce_network
+
+networks:
+  dce_network:
+    driver: bridge
+
+volumes:
+  dce_db:

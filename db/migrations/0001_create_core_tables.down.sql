@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS pushtag_urls;
+DROP TABLE IF EXISTS users;
+
+
