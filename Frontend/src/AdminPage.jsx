@@ -132,33 +132,33 @@ const AdminPage = ({ userId }) => {
     }, [userId, fetchUsers, fetchPushtags]); 
 
     return (
-        <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg border border-gray-100 mx-auto">
-            <h2 className="text-2xl font-bold text-red-700 mb-6">IT Admin User Management</h2>
+        <div className="w-full max-w-2xl bg-white/80 backdrop-blur p-8 rounded-2xl shadow-xl border border-white/60 mx-auto">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-indigo-700 mb-6 tracking-tight">IT Admin User Management</h2>
             <p className="mb-4 text-sm text-gray-600">
                 Manage users and pushtag mappings via the Go Backend API.
             </p>
             
-            <form onSubmit={handleAddUser} className="space-y-4 p-4 border rounded-lg mb-6 bg-gray-50">
+            <form onSubmit={handleAddUser} className="space-y-4 p-4 border rounded-xl mb-6 bg-gray-50">
                 <h3 className="text-lg font-semibold text-gray-800">Add New User</h3>
                 <input 
                     type="text" placeholder="Username" required 
                     value={newUsername} onChange={e => setNewUsername(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg focus:ring-red-500 focus:border-red-500" 
+                    className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
                 />
                 <input 
                     type="password" placeholder="Password (Plain Text)" required 
                     value={newPassword} onChange={e => setNewPassword(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg focus:ring-red-500 focus:border-red-500" 
+                    className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" 
                 />
                 <div className="flex items-center gap-3">
                     <label className="text-sm text-gray-700">Role</label>
-                    <select value={newRole} onChange={e => setNewRole(e.target.value)} className="px-3 py-2 border rounded-lg">
+                    <select value={newRole} onChange={e => setNewRole(e.target.value)} className="px-3 py-2 border rounded-xl focus:outline-none">
                         <option value="user">user</option>
                         <option value="admin">admin</option>
                     </select>
                 </div>
                 <button type="submit" disabled={isLoading}
-                    className="w-full py-2 px-4 rounded-lg text-white bg-red-600 hover:bg-red-700 transition duration-150 disabled:opacity-50">
+                    className="w-full py-2.5 px-4 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 transition duration-150 disabled:opacity-50 shadow-md">
                     {isLoading ? 'Adding ...' : 'Add User'}
                 </button>
             </form>
@@ -166,7 +166,7 @@ const AdminPage = ({ userId }) => {
             <StatusMessage message={status.message} type={status.type} />
             
             <h3 className="text-xl font-bold text-gray-800 mt-8 mb-4">Registered Users</h3>
-            <div className="bg-white border rounded-lg overflow-hidden shadow-sm">
+            <div className="bg-white/80 border rounded-xl overflow-hidden shadow">
                 <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                         <tr>
@@ -189,7 +189,7 @@ const AdminPage = ({ userId }) => {
                                     <td className="px-6 py-4 text-xs font-mono text-gray-400 truncate max-w-[100px]">{user.id}</td>
                                     <td className="px-6 py-4 text-right">
                                         <button onClick={() => handleDeleteUser(user.id, user.username)}
-                                            className="px-3 py-1 text-xs rounded bg-gray-100 hover:bg-red-100 text-red-700">
+                                            className="px-3 py-1 text-xs rounded-lg bg-gray-100 hover:bg-red-100 text-red-700">
                                             Delete
                                         </button>
                                     </td>
@@ -210,30 +210,47 @@ const AdminPage = ({ userId }) => {
             <hr className="my-8" />
 
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pushtag Mapping</h3>
-            <form onSubmit={handleAddPushtag} className="space-y-4 p-4 border rounded-lg mb-6 bg-gray-50">
+            <form onSubmit={handleAddPushtag} className="space-y-4 p-4 border rounded-xl mb-6 bg-gray-50">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <input type="text" placeholder="pushtag" required value={pushtag} onChange={e => setPushtag(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg focus:ring-red-500 focus:border-red-500" />
+                        className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" />
                     <input type="url" placeholder="URL (e.g. http://.../pushtag/latest)" required value={pushtagUrl} onChange={e => setPushtagUrl(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg focus:ring-red-500 focus:border-red-500" />
-                    <button type="submit" className="px-4 py-2 rounded-lg text-white bg-red-600 hover:bg-red-700">Save Mapping</button>
+                        className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" />
+                    <button type="submit" className="px-4 py-2 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 shadow-md">Save Mapping</button>
                 </div>
             </form>
 
-            <div className="bg-white border rounded-lg overflow-hidden shadow-sm">
+            <div className="bg-white/80 border rounded-xl overflow-hidden shadow">
                 <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                         <tr>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Existing Pushtags</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Pushtag</th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">URL</th>
                         </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                        {pushtags.length > 0 ? pushtags.map((t) => (
-                            <tr key={t}>
-                                <td className="px-6 py-4 text-sm text-gray-800">{t}</td>
+                        {pushtags.length > 0 ? pushtags.map((t) => {
+                            const key = typeof t === 'string' ? t : t.pushtag;
+                            const tag = typeof t === 'string' ? t : t.pushtag;
+                            const url = typeof t === 'string' ? '' : t.url;
+                            return (
+                                <tr key={key}>
+                                    <td className="px-6 py-4 text-sm text-gray-800">{tag}</td>
+                                    <td className="px-6 py-4 text-sm">
+                                        {url ? (
+                                            <a href={url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline break-all">
+                                                {url}
+                                            </a>
+                                        ) : (
+                                            <span className="text-gray-400">—</span>
+                                        )}
+                                    </td>
+                                </tr>
+                            );
+                        }) : (
+                            <tr>
+                                <td colSpan="2" className="px-6 py-4 text-sm text-gray-500">No pushtags yet.</td>
                             </tr>
-                        )) : (
-                            <tr><td className="px-6 py-4 text-sm text-gray-500">No pushtags yet.</td></tr>
                         )}
                     </tbody>
                 </table>

@@ -122,6 +122,23 @@ func initDB() error {
 	if _, err := db.Exec(pushtagSQL); err != nil {
 		return fmt.Errorf("create pushtag_urls: %w", err)
 	}
+
+	// Seed default admin user if not exists
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", "nvidia").Scan(&count); err != nil {
+		return fmt.Errorf("seed admin check: %w", err)
+	}
+	if count == 0 {
+		newID, err := randomIDHex(12)
+		if err != nil {
+			return fmt.Errorf("seed admin id: %w", err)
+		}
+		if _, err := db.Exec("INSERT INTO users (id, username, password, role) VALUES (?, ?, ?, ?)",
+			newID, "nvidia", "nvidia", "admin"); err != nil {
+			return fmt.Errorf("seed admin insert: %w", err)
+		}
+		log.Printf("Seeded default admin user 'nvidia' with role 'admin'.")
+	}
 	return nil
 }
 
@@ -445,25 +462,25 @@ func adminPushtagsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	} else if r.Method == http.MethodGet {
-		rows, err := db.Query("SELECT pushtag FROM pushtag_urls ORDER BY pushtag ASC")
+		rows, err := db.Query("SELECT pushtag, url FROM pushtag_urls ORDER BY pushtag ASC")
 		if err != nil {
 			writeJSONError(w, "Failed to fetch pushtags.", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
-		var tags []string
+		var mappings []PushtagMapping
 		for rows.Next() {
-			var t string
-			if err := rows.Scan(&t); err != nil {
+			var m PushtagMapping
+			if err := rows.Scan(&m.Pushtag, &m.URL); err != nil {
 				writeJSONError(w, "Failed to read pushtags.", http.StatusInternalServerError)
 				return
 			}
-			tags = append(tags, t)
+			mappings = append(mappings, m)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":  true,
-			"message":  fmt.Sprintf("Fetched %d pushtags.", len(tags)),
-			"pushtags": tags,
+			"message":  fmt.Sprintf("Fetched %d pushtags.", len(mappings)),
+			"pushtags": mappings,
 		})
 		return
 	}

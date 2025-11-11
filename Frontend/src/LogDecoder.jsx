@@ -44,28 +44,42 @@ const LogDecoder = ({ userId }) => {
   }, [pushtag, buildId, file]);
 
   return (
-    <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg border border-gray-100 mx-auto">
-      <h2 className="text-2xl font-bold text-indigo-700 mb-6">DCE Log Decoder</h2>
-      <form onSubmit={handleSubmit} className="space-y-4">
+    <div className="w-full max-w-2xl bg-white/80 backdrop-blur p-8 rounded-2xl shadow-xl border border-white/60 mx-auto">
+      <h2 className="text-2xl md:text-3xl font-extrabold text-indigo-700 mb-6 tracking-tight">DCE Log Decoder</h2>
+      <form onSubmit={handleSubmit} className="space-y-5">
         <div>
           <label className="block text-sm text-gray-700 mb-1">Pushtag</label>
           <input
             type="text" value={pushtag} onChange={e => setPushtag(e.target.value)} required
-            className="w-full px-3 py-2 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
           />
         </div>
         <div>
           <label className="block text-sm text-gray-700 mb-1">Build ID</label>
           <input
             type="text" value={buildId} onChange={e => setBuildId(e.target.value)} required
-            className="w-full px-3 py-2 border rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
           />
         </div>
         <div>
           <label className="block text-sm text-gray-700 mb-1">Encoded Log File (dce-enc.log)</label>
-          <input type="file" accept=".log,.txt" onChange={e => setFile(e.target.files?.[0] || null)} required />
+          <input
+            type="file"
+            accept=".log,.txt"
+            onChange={e => setFile(e.target.files?.[0] || null)}
+            required
+            className="block w-full text-sm text-gray-700
+                       file:mr-4 file:py-2 file:px-4
+                       file:rounded-lg file:border-0
+                       file:bg-indigo-50 file:text-indigo-700
+                       hover:file:bg-indigo-100"
+          />
         </div>
-        <button type="submit" disabled={isLoading} className="px-4 py-2 rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50">
+        <button
+          type="submit"
+          disabled={isLoading}
+          className="px-5 py-2.5 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 shadow-md"
+        >
           {isLoading ? 'Decoding...' : 'Decode and Download'}
         </button>
       </form>
