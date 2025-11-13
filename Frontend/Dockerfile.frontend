@@ -1,4 +1,6 @@
-# Stage 1: Build the React application
+# ======================================================
+# 1. Build the React application
+# ======================================================
 FROM node:20.10.0-alpine AS build
 
 WORKDIR /app
@@ -15,7 +17,9 @@ COPY Frontend/vite.config.js .
 # Run the build command
 RUN npm run build
 
-# Stage 2: Serve the application using a lightweight Nginx image
+# ======================================================
+# 2. Serve the application using a lightweight Nginx image
+# ======================================================
 FROM nginx:alpine
 
 # Install curl for container healthcheck probes
