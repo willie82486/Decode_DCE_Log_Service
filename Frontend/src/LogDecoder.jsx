@@ -1,27 +1,23 @@
 import React, { useState, useCallback } from 'react';
-import { API_DECODE_URL, StatusMessage } from './Constants.jsx';
+import { API_DECODE_URL, StatusMessage, authHeader } from './Constants.jsx';
 
-const LogDecoder = ({ userId }) => {
-  const [pushtag, setPushtag] = useState('');
-  const [buildId, setBuildId] = useState('');
+const LogDecoder = ({ userId, token }) => {
   const [file, setFile] = useState(null);
   const [status, setStatus] = useState({ message: '', type: 'info' });
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
-    if (!pushtag || !buildId || !file) {
-      setStatus({ message: 'Please provide pushtag, buildId, and a file.', type: 'error' });
+    if (!file) {
+      setStatus({ message: 'Please choose a dce-enc.log file.', type: 'error' });
       return;
     }
     setIsLoading(true);
     setStatus({ message: 'Uploading and decoding ...', type: 'info' });
     try {
       const form = new FormData();
-      form.append('pushtag', pushtag);
-      form.append('buildId', buildId);
       form.append('file', file);
-      const res = await fetch(API_DECODE_URL, { method: 'POST', body: form });
+      const res = await fetch(API_DECODE_URL, { method: 'POST', headers: { ...authHeader(token) }, body: form });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `Decode failed with ${res.status}`);
@@ -41,26 +37,12 @@ const LogDecoder = ({ userId }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [pushtag, buildId, file]);
+  }, [file, token]);
 
   return (
     <div className="w-full max-w-2xl bg-white/80 backdrop-blur p-8 rounded-2xl shadow-xl border border-white/60 mx-auto">
       <h2 className="text-2xl md:text-3xl font-extrabold text-indigo-700 mb-6 tracking-tight">DCE Log Decoder</h2>
       <form onSubmit={handleSubmit} className="space-y-5">
-        <div>
-          <label className="block text-sm text-gray-700 mb-1">Pushtag</label>
-          <input
-            type="text" value={pushtag} onChange={e => setPushtag(e.target.value)} required
-            className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm text-gray-700 mb-1">Build ID</label>
-          <input
-            type="text" value={buildId} onChange={e => setBuildId(e.target.value)} required
-            className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-          />
-        </div>
         <div>
           <label className="block text-sm text-gray-700 mb-1">Encoded Log File (dce-enc.log)</label>
           <input

@@ -1,11 +1,12 @@
 export const API_DECODE_URL = '/api/decode'; 
 export const API_LOGIN_URL = '/api/login'; 
 export const API_ADMIN_USERS_URL = '/api/admin/users'; 
-export const API_ADMIN_PUSHTAGS_URL = '/api/admin/pushtags';
-
-// --- Firebase Setup (not used) ---
-export const firebaseConfig = null; 
-export const appId = 'default-app-id'; 
+// --- Admin ELF APIs ---
+export const API_ADMIN_ELVES_URL = '/api/admin/elves';
+export const API_ADMIN_ELVES_UPLOAD_URL = '/api/admin/elves/upload';
+export const API_ADMIN_ELVES_BY_URL_STREAM_URL = '/api/admin/elves/by-url/stream';
+// Helper: build Authorization header
+export const authHeader = (token) => token ? { 'Authorization': `Bearer ${token}` } : {};
 
 // Helper component: Displays status messages
 export const StatusMessage = ({ message, type }) => {

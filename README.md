@@ -8,7 +8,7 @@ A containerized web service that decodes DCE logs by downloading and extracting 
 ## Quick Start (Local/VM)
 ```bash
 docker compose -f docker-compose.yml up -d --build
-curl -I http://localhost/nginx-health++
+curl -I http://localhost/nginx-health
 ```
 
 

@@ -17,6 +17,7 @@ services:
       # Example DSN for local MariaDB service
       # format: user:password@tcp(host:port)/database?parseTime=true
       - MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true
+      - JWT_SECRET=dev-secret
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
       interval: 10s
@@ -29,9 +30,6 @@ services:
         max-file: "3"
     # ports:
     #   - "8080:8080"
-    # Mount the host source code for Go (Optional: for live reload tools like Air, but not needed for this simple build)
-    # volumes:
-    #   - ./Backend:/app/Backend
     networks:
       - dce_network
       

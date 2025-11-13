@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import LoginPage from './LoginPage.jsx';
 import LogDecoder from './LogDecoder.jsx';
 import AdminPage from './AdminPage.jsx';
@@ -9,33 +9,71 @@ const App = () => {
     const [currentView, setCurrentView] = useState('decoder'); 
     const [userId, setUserId] = useState("mock-user-dce-001"); 
     const [userRole, setUserRole] = useState(null);
+    const [token, setToken] = useState('');
     const [authStatus, setAuthStatus] = useState({ message: 'Welcome to DCE-FW Log Service.', type: 'info' });
 
-    const handleLoginSuccess = useCallback((role) => { 
+    const handleLoginSuccess = useCallback((role, jwtToken) => { 
         setIsLoggedIn(true);
         setUserRole(role);
+        setToken(jwtToken || '');
         setAuthStatus({ message: 'Login successful. Navigating to decoder.', type: 'success' });
         setCurrentView('decoder');
+        try {
+            const next = { isLoggedIn: true, userRole: role, currentView: 'decoder', token: jwtToken || '' };
+            localStorage.setItem('dce-auth', JSON.stringify(next));
+        } catch {}
     }, []);
     
     const handleLogout = useCallback(() => {
         setIsLoggedIn(false);
         setUserRole(null); 
+        setToken('');
         setCurrentView('decoder');
         setAuthStatus({ message: 'Logged out successfully.', type: 'info' });
+        try { localStorage.removeItem('dce-auth'); } catch {}
     }, []); 
+
+    // Restore login state on first mount
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem('dce-auth');
+            if (raw) {
+                const saved = JSON.parse(raw);
+                if (saved?.isLoggedIn) {
+                    setIsLoggedIn(true);
+                    setUserRole(saved.userRole || null);
+                    setToken(saved.token || '');
+                    setCurrentView(saved.currentView || 'decoder');
+                    setAuthStatus({ message: 'Session restored.', type: 'success' });
+                }
+            }
+        } catch {}
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Persist view/role changes while logged in
+    useEffect(() => {
+        try {
+            const raw = localStorage.getItem('dce-auth');
+            const saved = raw ? JSON.parse(raw) : {};
+            const next = { ...saved, isLoggedIn, userRole, currentView, token };
+            if (isLoggedIn) {
+                localStorage.setItem('dce-auth', JSON.stringify(next));
+            }
+        } catch {}
+    }, [isLoggedIn, userRole, currentView, token]);
 
     const renderContent = () => {
         if (!isLoggedIn) {
             return <LoginPage onLoginSuccess={handleLoginSuccess} />;
         }
-        switch (currentView) {
+                switch (currentView) {
             case 'decoder':
-                return <LogDecoder userId={userId} />;
+                        return <LogDecoder userId={userId} token={token} />;
             case 'admin':
-                return <AdminPage userId={userId} />; 
+                        return <AdminPage userId={userId} token={token} />; 
             default:
-                return <LogDecoder userId={userId} />;
+                        return <LogDecoder userId={userId} token={token} />;
         }
     };
 

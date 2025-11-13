@@ -14,18 +14,24 @@ COPY Backend/go.mod Backend/go.sum ./
 RUN go mod download
 
 # Copy the source code
-COPY Backend/main.go .
+COPY Backend/*.go .
 
 # Build the application
-RUN go mod tidy && go build -o /dce-log-backend main.go
+RUN go mod tidy && go build -o /dce-log-backend .
 
 # ======================================================
 # Create the final lean image
 # ======================================================
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-# bzip2 and tar must be reinstalled to enable decompression at runtime
-RUN apk update && apk add --no-cache bzip2 tar curl
+# Install runtime tools:
+# - curl, bzip2, tar: for admin fetch/extract flows
+# - binutils: provides readelf (extract GNU Build ID)
+# - bsdextrautils: provides hexdump (decode build id from log)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl bzip2 tar binutils bsdextrautils && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root/
 # Copy the built binary

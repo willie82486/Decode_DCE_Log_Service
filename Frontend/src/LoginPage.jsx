@@ -29,8 +29,9 @@ const LoginPage = ({ onLoginSuccess }) => {
 
             if (response.ok && result.success) {
                 const role = result.role || 'user'; 
+                const token = result.token || '';
                 setStatus({ message: `Login successful! Welcome, ${username} (${role}).`, type: 'success' });
-                onLoginSuccess(role)
+                onLoginSuccess(role, token)
             } else {
                 setStatus({ message: result.message || "Login failed. Invalid credentials or server error.", type: 'error' });
             }

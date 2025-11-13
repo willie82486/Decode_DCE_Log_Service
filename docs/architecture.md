@@ -1,278 +1,341 @@
-## Decode DCE Log Service — L1 Software Architecture & Design 
+## Decode DCE Log Service — L1 Software Architecture & Design
 
 ### 0. Document Info
 - System: Decode DCE Log Service
-- Version: v1.0 (Draft)
-- Date: 2025-11-09
+- Version: v1.2 (Revised after build-id auto-detection)
+- Date: 2025-11-13
 - Level: L1 (Architecture & High-level Design)
 
 ---
 
+
+
 ### 1. Introduction & Goals
-- Purpose: Provide an interface to upload `dce-enc.log` and input `pushtag/buildId`. The backend downloads and extracts required artifacts, locates the target ELF, invokes `nvlog_decoder`, and returns a decoded log file.
+- Purpose: Provide an interface for users to upload a DCE encoded log (`dce-enc.log`) and automatically decode it. The backend extracts the GNU Build ID directly from the uploaded log via a short `hexdump` of the first 4 lines, resolves the corresponding ELF from the database, invokes `nvlog_decoder`, and returns a decoded log file.
 - Goals:
-  - Two-tier cloud deployment: frontend and backend as containers on Azure Container Apps (ACA); database on Azure managed DB (PostgreSQL recommended).
-  - Reduce operations burden: PaaS, health checks, container log rotation, baseline security and monitoring.
-  - Scalability: enable horizontal scaling for API instances.
+  - Two-tier deployment: frontend (Nginx SPA + reverse proxy), backend (Go API), database (MariaDB for local; managed DB for cloud).
+  - Operational simplicity: health checks, container log rotation, baseline security/observability.
+  - Scalability: backend horizontally scalable.
 
 ---
 
 ### 2. Scope & Out of Scope
-- In Scope: frontend (Nginx static serving + reverse proxy), backend (Go REST API), database (Azure managed), deployment (ACA/ACR), health checks and logs.
-- Out of Scope: complex RBAC, workflow engines, real-time streaming pipelines, cross-region active-active (planned later).
+- In Scope: frontend (Nginx static + proxy), backend (Go REST API), database (MariaDB locally, cloud managed DB), containerization and health checks.
+- Out of Scope: complex RBAC, workflow engines, real-time pipelines, cross-region active-active (future).
 
 ---
 
 ### 3. High-level Architecture
-- Request path: Client → ACA Ingress (Frontend, TLS terminates at ACA) → Nginx (serves SPA and proxies `/api`) → Go Backend (business logic) → Azure Database (managed DB).
-- Two Container Apps:
-  - Container App: frontend (Ingress enabled; Nginx serves static SPA and proxies `/api` to backend).
-  - Container App: backend (Ingress disabled; internal-only).
-  - Database: Azure Database for PostgreSQL (Flexible Server preferred; Private Endpoint or restricted public access).
-- Flow:
-  - Frontend: Nginx returns static files; routes `/api/*` to backend.
-  - Backend: creates temp work dir → downloads/extracts archives → locates ELF → calls `nvlog_decoder` → returns decoded file.
+- Request path: Client → Frontend (Nginx; serves SPA and proxies `/api`) → Go Backend (business logic) → Database.
+- Containers:
+  - Frontend: Nginx serves SPA and proxies `/api` to backend over the Docker network.
+  - Backend: Go HTTP server (internal only in compose; exposed through frontend).
+  - Database: MariaDB (local dev) or managed DB in cloud.
+- Decode Flow (runtime):
+  1) Frontend uploads `dce-enc.log` via `POST /api/decode` (multipart; file only).
+  2) Backend saves the file to a temp workspace.
+  3) Backend executes `hexdump -C dce-enc.log | head -n 4`, parses bytes at offsets `0x20..0x33` (20 bytes) into a lowercase 40-hex Build ID.
+  4) Backend loads the matching ELF blob from DB by Build ID and writes it to a temp path.
+  5) Backend runs `nvlog_decoder` to produce `dce-decoded.log`, then streams it back as a file download.
+  6) Response headers include `X-Build-Id` and `X-ELF-File` for traceability.
 
 ---
 
 ### 4. Component Design
 - Frontend (React + Nginx)
-  - Vite is used only for build (no dev server in production). Nginx serves `index.html` and static assets from `/usr/share/nginx/html`.
-  - Reverse proxy `/api` to `go-backend:8080` over the container network.
-  - Health endpoint `/nginx-health` returns 200 and has `access_log off`.
+  - Vite for build. Nginx serves `index.html` and static assets from `/usr/share/nginx/html`.
+  - Reverse proxy `/api` to `go-backend:8080` (same Docker network).
+  - Health endpoint `/nginx-health` returns 200 with `access_log off`.
+  - UI: the Log Decoder page now only asks the user to upload `dce-enc.log` (no `buildId` or `pushtag` fields).
 - Backend (Go)
-  - Endpoints: `POST /api/decode`, `POST /api/login`, `GET/POST /api/admin/users`, `GET /healthz`.
-  - Decode flow: multipart upload → temp dir → download/extract → find `display-t234-dce-log.elf` → call `nvlog_decoder` → return `dce-decoded.log`.
-  - Health: `/healthz` returns 200 OK.
-- Container Images
-  - Backend: build on `golang:alpine`, runtime on `alpine` with `bzip2 tar curl`; ships `nvlog_decoder`.
-  - Frontend: `nginx:alpine`, install `curl` for healthcheck probes.
+  - Endpoints:
+    - `POST /api/login` issues a JWT with the user role.
+    - `POST /api/decode` (Bearer token required): multipart with `file` only; auto-extract Build ID from hexdump; fetch ELF by Build ID; run decoder; return `dce-decoded.log`. Adds `X-Build-Id` and `X-ELF-File` headers.
+    - Admin (Bearer token; role=admin):
+      - `GET/POST/DELETE /api/admin/users`
+      - `GET /api/admin/elves` (list `{ buildId, elfFileName }`), `DELETE /api/admin/elves?buildId=...`
+      - `POST /api/admin/elves/upload` (multipart `elf`): extract Build ID from ELF (via `readelf -n` or SHA1 fallback), store blob.
+      - `POST /api/admin/elves/by-url` and `GET /api/admin/elves/by-url/stream`: download and extract artifacts by URL, locate `display-t234-dce-log.elf`, extract Build ID, and store; the `/stream` variant emits step-by-step progress via SSE.
+    - `GET /healthz` (liveness/readiness).
+  - Build ID extraction
+    - ELF: primary via `readelf -n` Build ID; fallback to SHA1(file bytes).
+    - Log: via `hexdump -C <log> | head -n 4`, concatenating 16 bytes from the `0x20` line and 4 bytes from the `0x30` line to form 40-hex Build ID.
+  - Decoder invocation
+    - Command: `nvlog_decoder -d none -i <encodedLog> -o <decodedLog> -e <elfPath> -f DCE`.
+    - The `-e` parameter points to the actual temp ELF path (not an augmented name).
+    - Robust error handling: captures `CombinedOutput`; verifies the decoded file exists and is non-empty before returning.
 
 ---
 
 ### 5. APIs (High-level)
-- `POST /api/decode`: multipart upload `file` with fields `pushtag` and `buildId`; performs decode via pushtag→url mapping in DB; returns `dce-decoded.log` (response includes `X-ELF-File` header).
-- `POST /api/login`: login against DB (local dev uses plaintext; production will use hashed passwords).
-- `GET /api/admin/users`: list users (admins first); password not included in response.
-- `POST /api/admin/users`: create user with `{username,password,role}` where role ∈ {admin,user}.
-- `DELETE /api/admin/users?id=<id>`: delete user by id.
-- `GET /api/admin/pushtags`: list existing pushtags (names only).
-- `POST /api/admin/pushtags`: upsert `{pushtag,url}` mapping.
-- `GET /healthz`: liveness/readiness healthcheck.
+- Auth
+  - `POST /api/login`: body `{username,password}`; returns `{success, role, token}` (HS256; `JWT_SECRET`).
+- Decode
+  - `POST /api/decode` (Bearer token required): multipart upload with field `file` only.
+    - Behavior: save → extract Build ID from hexdump → fetch ELF by Build ID → decode → return file.
+    - Headers: `X-Build-Id`, `X-ELF-File` on success; on failure, returns clear error messages and logs decoder output.
+- Admin
+  - `GET /api/admin/users`, `POST /api/admin/users`, `DELETE /api/admin/users?id=<id>`
+  - `GET /api/admin/elves` → `[ { buildId, elfFileName }, ... ]`
+  - `DELETE /api/admin/elves?buildId=<id>`
+  - `POST /api/admin/elves/upload` (multipart `elf`)
+  - `POST /api/admin/elves/by-url` (JSON `{pushtag,url}`), and `GET /api/admin/elves/by-url/stream?pushtag=...&url=...` (SSE progress)
+- Health
+  - `GET /healthz` → 200 OK
 
 ---
 
-### 6. Data Model (Planned DB)
-- DB: Azure Database for PostgreSQL (Flexible Server).
-- Proposed tables:
-  - `users`: id (string PK), username (UNIQUE), password (plaintext for local dev), role, created_at.
-  - `pushtag_urls`: pushtag (PK), url, created_at.
-- Connection:
-  - Inject `DATABASE_URL` via ACA Secrets; enforce SSL (e.g., `sslmode=require`).
-  - Prefer Private Endpoint; otherwise restrict public firewall to ACA egress and enforce SSL.
+### 6. Data Model
+- Local/dev DB: MariaDB (via docker-compose).
+- Tables:
+  - `users`: `id` (PK), `username` (UNIQUE), `password` (plaintext for dev), `role`, `created_at`.
+  - `build_elves`: `build_id` (PK), `elf_filename`, `elf_blob` (LONGBLOB), `created_at`.
+- Connection (local):
+  - `MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true`
 
 ---
 
-### 7. Deployment & Environments (Azure)
-- Pipeline:
-  - Build images → push to Azure Container Registry (ACR) → create ACA Environment (optionally VNet integrated) → deploy frontend/backend Container Apps.
-- Frontend Container App:
-  - Ingress: enabled (HTTPS), TLS managed by ACA or a fronting Front Door.
-  - Env/Secrets: only if needed (usually same-origin `/api` needs none).
-- Backend Container App:
-  - Ingress: disabled (internal only).
-  - Secrets: `DATABASE_URL` and any other sensitive settings.
+### 7. Deployment & Environments
+- Pipeline: Build images → run locally with Docker Compose; in cloud, publish to registry and deploy (e.g., Azure Container Apps).
+- Frontend Container:
+  - Ingress enabled (HTTP for local). Proxies `/api` to backend within the network.
+- Backend Container:
+  - No host port published in production-mode compose; reachable via frontend proxy.
+  - Secrets: `JWT_SECRET`, `MYSQL_DSN`/`DATABASE_URL` (cloud: prefer managed DB and SSL).
 - Database:
-  - Azure Database for PostgreSQL with automated backups and HA; Private Endpoint preferred.
+  - MariaDB (compose) with mounted init script and a one-shot migration container.
 - Scaling:
-  - Frontend: autoscale by HTTP requests/connections; min 1 instance.
-  - Backend: autoscale by CPU or HTTP concurrency; min 1 instance.
+  - Frontend: scale by requests/connections; min 1 instance.
+  - Backend: scale by CPU/HTTP concurrency; min 1 instance.
 
 ---
 
 ### 8. Networking & Security
-- Perimeter:
-  - External entry via ACA Ingress (or Azure Front Door/Application Gateway in front). Nginx and backend do not need public exposure.
-- TLS:
-  - Terminate TLS at ACA/Front Door. Internal hop to frontend can be HTTP (simple) or end-to-end HTTPS (stricter, requires Nginx certs).
-- Secrets:
-  - Use ACA Secrets/Azure Key Vault. Do not bake secrets into images.
-- Least Privilege:
-  - Minimal ACR Pull role, least-privileged DB user, NSG rules restricted to necessary sources/ports.
+- Perimeter: Frontend exposed; backend internal-only; DB internal.
+- TLS: Terminate at ingress in cloud (fronting proxy/ingress). For local, HTTP-only.
+- Secrets: Use environment variables; in cloud, use ACA Secrets/Key Vault.
+- JWT: HS256 with `JWT_SECRET`. Authorization header is preserved by Nginx proxy.
+- Least privilege: DB user limited; container logs rotated.
 
 ---
 
 ### 9. Health & Logging
 - Health Checks:
-  - Frontend: `/nginx-health` (200; `access_log off`) for liveness/readiness.
+  - Frontend: `/nginx-health` (200).
   - Backend: `/healthz` (200).
-  - Used by ACA probes for startup/liveness/readiness and auto-restarts.
 - Logs:
-  - Container-level log rotation with Docker `json-file` driver (`max-size`, `max-file`) to avoid disk exhaustion (for local/VM).
-  - In Azure: send stdout/stderr to Log Analytics; optionally integrate Application Insights for request tracing and dependency timing.
+  - Docker `json-file` with rotation.
+  - Backend prints detailed decoder stdout/stderr on failure; includes `X-Build-Id` in responses to aid troubleshooting.
 
 ---
 
 ### 10. Non-functional Requirements (NFRs)
-- Availability: ≥ 99.9% during business hours.
-- Performance: end-to-end latency driven by external downloads/extractions and decoder runtime; backend horizontally scalable.
-- Security: TLS, secrets management, least privilege, private networking, optional WAF.
-- Operability: health probes, log rotation, monitoring/alerts, restart/redeploy procedures.
+- Availability: ≥ 99.9% business hours.
+- Performance: bound by decoder and archive operations; backend horizontally scalable.
+- Security: JWT, secrets management, minimal exposure, private networking in cloud.
+- Operability: health probes, log rotation, structured error messages, and diagnostics.
 
 ---
 
 ### 11. Risks & Mitigations
-- External source instability (download/extract failures):
-  - Retries, clear error reporting, mirror sources if possible.
+- External artifacts unavailable or slow:
+  - SSE progress for by-URL fetch; explicit error propagation.
 - `nvlog_decoder` compatibility/resource usage:
-  - Monitor CPU/memory; consider async jobs and concurrency caps.
+  - Capture outputs; validate produced file; use worker model if needed later.
 - Large files/long-running tasks:
-  - Introduce a job queue and worker model; track job states and avoid blocking sync APIs.
+  - Future option: async jobs and status tracking UI.
 
 ---
 
-### 12. Operations Guide (Local & VM Environments)
-
-This section provides practical references for deploying, verifying, and operating the system in local development or a VM environment.
-
-#### Deployment Overview
-- **Production Docker Compose (`HTTP-only`):**
-  - The **frontend** service exposes port `80:80`, acting as a reverse proxy for all `/api` traffic to the backend.
-  - The **backend** service runs internally and does *not* publish any ports to the host.
-- **Database:** 
-  - Uses a MariaDB container named `mariadb`, preconfigured with the database `dce_logs`.
-  - The backend connects using:  
-    `MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true`
-
-#### Health Checks
-- **Frontend Health:**
-  - General: `curl -I http://<host>/nginx-health`
-  - Local example: `curl -sS http://localhost:3000/nginx-health`
-- **Backend Health:**
-  - Accessible from inside a container or via Docker network:  
-    `curl -I http://localhost:8080/healthz`
-- **Database Health:**
-  - Inspect health:  
-    `docker inspect dce-log-mariadb --format '{{json .State.Health}}' | jq`
-  - If you see errors like `mysqladmin: not found`, use:
-    - `docker exec dce-log-mariadb which mariadb-admin`
-    - `docker exec dce-log-mariadb which mysqladmin`
-  - If necessary, update `docker-compose.yml` healthcheck accordingly:  
-    `test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 --silent || exit 1"]`
-
-#### Container Management
-- **View container status (including health):**  
-  `docker ps`
-- **View logs (last 200 lines):**
-  - MariaDB: `docker logs dce-log-mariadb --tail 200`
-  - Backend: `docker logs dce-log-backend --tail 200`
-- **Live log streaming:**  
-  (add `-f`) e.g., `docker logs -f dce-log-backend`
-- **Log rotation:**  
-  Enabled using the Docker `json-file` driver with limits on log size and rotations to prevent disk exhaustion.
-
-#### Basic API Test Commands (Local)
-- **Create user:**  
-  `curl -s -X POST http://localhost:3000/api/admin/users -H 'Content-Type: application/json' -d '{"username":"admin1","password":"password123","role":"admin"}'`
-- **List users:**  
-  `curl -s http://localhost:3000/api/admin/users`
-- **Delete user:**  
-  `curl -s -X DELETE 'http://localhost:3000/api/admin/users?id=<USER_ID>'`
-- **Upsert pushtag mapping:**  
-  `curl -s -X POST http://localhost:3000/api/admin/pushtags -H 'Content-Type: application/json' -d '{"pushtag":"r36-abc","url":"http://buildbrain/.../r36-abc/latest"}'`
-- **List pushtags:**  
-  `curl -s http://localhost:3000/api/admin/pushtags`
-- **Decode upload:**  
-  `curl -s -X POST http://localhost:3000/api/decode -F pushtag=r36-abc -F buildId=1234 -F file=@./dce-enc.log -o dce-decoded.log`
-
-#### Command Quick Reference
-- **Build and start services:**  
-  `docker compose up -d --build`
-- **Force backend rebuild (resolve Go dep/cache issues):**  
-  `docker compose build --no-cache go-backend && docker compose up -d`
-- **Database Volumes & Data:**
-  - List volumes: `docker volume ls`
-  - Inspect a volume: `docker volume inspect dce_db`
-  - Remove all containers & volumes (WARNING: deletes data!):  
-    `docker compose down -v`
-
-#### Database Initialization & Migrations
-- **Initialization scripts (first run only):**
-  - The schema file `db/init/001_schema.sql` is mounted to the MariaDB container at `/docker-entrypoint-initdb.d/001_schema.sql` via:
-    - `mariadb.volumes: - ./db/init:/docker-entrypoint-initdb.d:ro`
-  - MariaDB runs scripts in `/docker-entrypoint-initdb.d` only when the data directory is empty (i.e., first run with a fresh volume).
-- **Versioned migrations (on every deploy):**
-  - A one-shot migration service runs before the backend:
-    - Service: `migrate` (image `migrate/migrate:4`)
-    - Command: `migrate -path /migrations -database "mysql://dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?multiStatements=true" up`
-    - Mounts: `./db/migrations:/migrations:ro`
-    - Compose dependency: backend waits on `migrate` with `condition: service_completed_successfully`
-  - Migration files live in `db/migrations/`:
-    - `0001_create_core_tables.up.sql` / `0001_create_core_tables.down.sql`
-  - For local/dev convenience, initial `up.sql` uses `IF NOT EXISTS` to be idempotent alongside the init script.
-- **If the volume already exists and tables are missing (no data loss):**
-  - Apply the schema manually:
-    ```
-    docker exec -i dce-log-mariadb sh -c 'mariadb -udce_user -pdce_pass < /docker-entrypoint-initdb.d/001_schema.sql'
-    ```
-- **Reset DB (data loss) to re-trigger init scripts:**
-  - Useful for local dev if you want a clean slate:
-    ```
-    docker compose down -v
-    docker compose up -d --build
-    ```
-- **Healthcheck tooling:**
-  - The container uses `mariadb-admin` for health checks (not `mysqladmin`):
-    - `test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 --silent || exit 1"]`
-  - Validate tool presence:
-    ```
-    docker exec dce-log-mariadb which mariadb-admin
-    ```
+### 13. Container Images
+- Backend
+  - Build stage: `golang:1.22-alpine` (compile static binary).
+  - Runtime stage: `debian:bookworm-slim` with `binutils` (for `readelf`) and `bsdextrautils` (for `hexdump`), plus `curl`, `bzip2`, `tar`.
+  - Ships `nvlog_decoder` at `/usr/local/bin/nvlog_decoder`.
+- Frontend
+  - `nginx:alpine`. Serves built SPA and proxies `/api` to backend.
 
 ---
 
-### 13. Roadmap (from zero)
-- Milestone 0 — Project Bootstrap
-  - Initialize repo structure (Frontend/Backend), coding standards.
-  - Add basic README and architecture docs (this file).
-  - Confirm how to obtain `nvlog_decoder`.
-- Milestone 1 — Local MVP (DB-backed)
-  - Backend:
-    - Implement `POST /api/login` against local MariaDB (plaintext for dev; plan to hash in prod).
-    - Implement `/api/admin/users` (GET/POST/DELETE) backed by DB; enforce unique username; admin-first ordering on list; do not expose password in responses.
-    - Implement `/api/admin/pushtags` (GET/POST) backed by DB.
-    - Implement `/api/decode` to resolve `pushtag → url` from DB before download/decode; return `X-ELF-File`.
-    - Provide `/healthz` health endpoint.
-  - Frontend:
-    - LoginPage (calls `/api/login` and captures role).
-    - LogDecoder (multipart upload with `pushtag` and `buildId`).
-    - AdminPage (add/list/delete users; add/list pushtags).
-    - Nginx serves SPA and reverse proxies `/api`; `/nginx-health` for probes.
-  - Database (MariaDB):
-    - Compose service `mariadb:11` (local-only). Environment variables:
-      - `MARIADB_DATABASE=dce_logs`, `MARIADB_USER=dce_user`, `MARIADB_PASSWORD=dce_pass`, `MARIADB_ROOT_PASSWORD=rootpassword`
-    - Backend connection string injected via env:
-      - `MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true`
-    - Auto-create tables on backend startup:
-      - `users(id, username UNIQUE, password, role, created_at)`
-      - `pushtag_urls(pushtag PK, url, created_at)`
-    - Healthcheck: `mysqladmin ping` (compose healthcheck)
-    - Note: For local development, passwords are stored in plaintext; in cloud, switch to hashing (e.g., bcrypt).
-    - Optional: add a named volume to persist DB data across container rebuilds.
-  - Containerization:
-    - Dockerfiles for frontend/backend; `docker-compose.yml` including MariaDB; healthchecks and container log rotation.
-- Milestone 2 — Cloud Baseline (ACA + Managed DB)
-  - Build/push images to ACR; deploy two Container Apps (frontend with Ingress, backend internal-only).
-  - Configure secrets via ACA (e.g., `DATABASE_URL`); bind custom domain and TLS at ACA/Front Door.
-  - Provision Azure managed DB (PostgreSQL preferred); wire up `DATABASE_URL` (SSL required).
-  - Migrate `login/admin users` to managed DB; add basic audit logs.
-- Milestone 3 — Observability & Operations
-  - Send logs to Log Analytics; basic dashboards and alerts.
-  - Backup/restore drill for DB; initial load/perf tests; cost baseline and right-sizing.
-- Milestone 4 — Optional Enhancements (do when time allows)
-  - Async decode jobs (Queue + Worker) [OPTIONAL].
-  - Frontend job status UI [OPTIONAL].
-- Out of Scope for Now
-  - “Hard” security hardening (e.g., WAF tuning, end-to-end TLS everywhere, threat modeling workshops) — intentionally deferred. Keep baseline security only: TLS at ingress, least privilege, secrets management, private networking preference.
+### 14. Current UI Behavior
+- Login (role-aware) → Log Decoder page (upload `dce-enc.log`) → Download decoded log.
+- Admin page:
+  - Manage users.
+  - Manage ELF library (details below).
 
 ---
+
+### 15. ELF Library Management (Detailed)
+
+This module provides a complete workflow to ingest, store, and curate the DCE decoder ELF artifacts that are used by `/api/decode`.
+
+- Data model
+  - Table: `build_elves`
+    - `build_id` VARCHAR(255) PRIMARY KEY
+    - `elf_filename` VARCHAR(255) (original or normalized name)
+    - `elf_blob` LONGBLOB (full binary of `display-t234-dce-log.elf`)
+    - `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  - Upsert semantics: inserts or updates existing row on the same `build_id` (latest elf blob wins).
+
+- Admin APIs
+  - `GET /api/admin/elves`
+    - Returns an array of `{ buildId, elfFileName }`, sorted by `created_at DESC`.
+  - `DELETE /api/admin/elves?buildId=<id>`
+    - Permanently removes the record for the build ID.
+  - `POST /api/admin/elves/upload` (multipart `elf`)
+    - Accepts a single ELF file (field name `elf`).
+    - Extracts Build ID using `readelf -n` (GNU Build ID). If unavailable, falls back to SHA1(file bytes).
+    - Filename normalization rules:
+      - If the original name already matches `display-t234-dce-log.elf__<pushtag>__<40-hex>`, it is preserved.
+      - Otherwise, it is normalized to `display-t234-dce-log.elf__<buildId>`.
+    - Stores the full binary in DB with upsert semantics.
+    - Response JSON: `{ success, buildId, elfFileName }`.
+  - `POST /api/admin/elves/by-url` (JSON `{pushtag,url}`) and `GET /api/admin/elves/by-url/stream?pushtag=...&url=...`
+    - Download `full_linux_for_tegra.tbz2` from `<url>`, extract, locate `host_overlay_deployed.tbz2`, extract overlay, and find `display-t234-dce-log.elf`.
+    - Extract Build ID (as above), read bytes, upsert into DB.
+    - The `/stream` variant emits Server-Sent Events (SSE) to report progress:
+      - `event: step` with human-readable messages (e.g., "Downloading...", "Extracting overlay...", "Storing ELF...").
+      - `event: error` on failures (download/extract/locate/DB).
+      - `event: done` with data `{"buildId": "...", "elfFileName": "..."}` on success.
+
+- Admin UI
+  - Upload ELF
+    - File picker for `.elf`; upon success, shows the resolved Build ID, clears the input, and refreshes the list.
+  - Fetch ELF by URL
+    - Inputs: `pushtag`, `url`; show live progress via SSE and persist the progress to `localStorage` (key: `dce_by_url_state`) so a page refresh does not lose context; a "Clear" button resets the saved progress.
+  - List & Delete
+    - Displays `Build ID` and `ELF File Name`; provides a Delete action (with confirmation, then calls `DELETE`).
+
+- ⚠️ **Warning:** Operational notes
+  - Only users with role `admin` can access these endpoints and UI.
+  - Binary size: stored in LONGBLOB; ensure DB instance/volume capacity and retention policy meet your needs.
+  - Re-ingesting the same `build_id` will overwrite the previous binary and filename (upsert).
+  - Decoder expects the real filesystem path for `-e`; the backend writes DB blob to a temp file and passes that absolute path.
+
+---
+### 16. Operations Guide (Local)
+
+This section provides command-focused guidance for developers/operators to build, run, test, and debug the system locally.
+
+#### 16.1 Command Quick Start
+- Build and start all services:
+  ```bash
+  docker compose up -d --build
+  ```
+- Force rebuild backend (replace with any container you modify) only (no cache), then restart it:
+  ```bash
+  docker compose build --no-cache go-backend && docker compose up -d go-backend
+  ```
+- Tail logs quickly:
+  ```bash
+  docker logs dce-log-go-backend --tail 200
+  docker logs dce-log-mariadb --tail 200
+  docker logs dce-log-web-frontend --tail 200
+  ```
+- Exec into a container shell:
+  ```bash
+  docker compose exec dce-log-go-backend sh
+  docker compose exec dce-log-mariadb bash
+  ```
+
+#### 16.2 Container Management
+- List containers and health:
+  ```bash
+  docker ps
+  docker inspect dce-log-mariadb --format '{{json .State.Health}}' | jq
+  ```
+- Live log streaming:
+  ```bash
+  docker logs -f dce-log-go-backend
+  ```
+  or
+   ```bash
+  docker compose logs -f go-backend 
+   ```
+  Notes:
+  - `docker compose logs -f go-backend` targets the Compose service name, aggregates logs across replicas, and keeps following logs across container recreations.
+  - `docker logs -f dce-log-go-backend` targets a single container by name/ID; it does not aggregate replicas and needs to be re-run if the container is recreated with a new name/ID.
+  - Both support flags like `--tail`, `--since`, and `--timestamps`.
+  
+- Restart a single service:
+  ```bash
+  docker compose restart dce-log-go-backend
+  ```
+- Stop all and remove (keep volumes):
+  ```bash
+  docker compose down
+  ```
+- Stop all and remove including volumes (DANGER: wipes DB data):
+  ```bash
+  docker compose down -v
+  ```
+
+#### 16.3 Health Checks
+- Frontend (from host):
+  ```bash
+  curl -sS -I http://localhost:3000/nginx-health
+  ```
+- Backend (from within Docker network; e.g., run in frontend container):
+  ```bash
+  docker compose exec dce-log-web-frontend curl -I http://go-backend:8080/healthz
+  ```
+- Database health:
+  ```bash
+  docker inspect dce-log-mariadb --format '{{json .State.Health}}' | jq
+  docker compose exec dce-log-mariadb which mariadb-admin
+  ```
+
+#### 16.4 Basic API Test Commands (Local)
+- Login and get a JWT:
+  ```bash
+  # default seeded admin (local/dev): username=nvidia password=nvidia
+  TOKEN=$(curl -s -X POST http://localhost:3000/api/login \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"nvidia","password":"nvidia"}' | jq -r .token)
+  echo "$TOKEN"
+  ```
+- Admin: list users
+  ```bash
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/admin/users | jq
+  ```
+- Admin: add and delete a user
+
+  ```bash
+  # add user
+  curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -X POST http://localhost:3000/api/admin/users \
+    -d '{"username":"test","password":"test","role":"user"}' | jq
+  # Delete by id:
+  curl -s -H "Authorization: Bearer $TOKEN" -X DELETE 'http://localhost:3000/api/admin/users?id=<USER_ID>' | jq
+  ```
+- Admin: list ELF records
+  ```bash
+  curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/admin/elves | jq
+  ```
+- Admin: upload an ELF
+  ```bash
+  curl -s -H "Authorization: Bearer $TOKEN" -X POST \
+    http://localhost:3000/api/admin/elves/upload \
+    -F elf=@./display-t234-dce-log.elf | jq
+  ```
+- Admin: fetch by URL (non-stream + stream)
+  ```bash
+  curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -X POST http://localhost:3000/api/admin/elves/by-url \
+    -d '{"pushtag":"r36-abc","url":"http://.../r36-abc/latest"}' | jq
+
+  # Stream progress (SSE); watch raw events:
+  curl -N -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:3000/api/admin/elves/by-url/stream?pushtag=r36-abc&url=http://.../r36-abc/latest"
+  ```
+- Decode upload (user flow): only the file is required; Build ID is auto-detected
+  ```bash
+  curl -s -H "Authorization: Bearer $TOKEN" \
+    -X POST http://localhost:3000/api/decode \
+    -F file=@./dce-enc.log \
+    -o dce-decoded.log -D headers.txt
+  echo "Build-ID header:" && grep -i X-Build-Id headers.txt || true
+  echo "ELF header:" && grep -i X-ELF-File headers.txt || true
+  ```
+  
+  ---
