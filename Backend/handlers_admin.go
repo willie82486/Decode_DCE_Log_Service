@@ -183,7 +183,182 @@ func adminElvesByURLHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SSE streaming of progress for fetch-by-url
+// performByURLJob runs the by-URL flow in background and reports steps to job
+func performByURLJob(job *ByURLJob) {
+	step := 0
+	emitStep := func(msg string) {
+		job.broadcast(ByURLEvent{Type: "step", Message: msg, StepIndex: step, TotalSteps: job.Total})
+		step++
+	}
+	emitErr := func(err error) {
+		job.broadcast(ByURLEvent{Type: "error", Message: err.Error(), StepIndex: step, TotalSteps: job.Total})
+	}
+	emitDone := func(buildID, elfName string) {
+		job.broadcast(ByURLEvent{Type: "done", Message: "Completed.", StepIndex: step, TotalSteps: job.Total, BuildID: buildID, ElfName: elfName})
+	}
+
+	emitStep("Creating temp workspace...")
+	workDir, err := ioutil.TempDir("", "dce-elf-fetch-")
+	if err != nil { emitErr(fmt.Errorf("temp dir: %w", err)); return }
+	defer os.RemoveAll(workDir)
+
+	emitStep("Downloading full_linux_for_tegra.tbz2...")
+	tbz2File := filepath.Join(workDir, "full_linux_for_tegra.tbz2")
+	if err := exec.CommandContext(job.ctx, "curl", "-L", fmt.Sprintf("%s/full_linux_for_tegra.tbz2", job.URL), "-o", tbz2File).Run(); err != nil {
+		emitErr(fmt.Errorf("download failed: %w", err)); return
+	}
+
+	emitStep("Extracting main archive...")
+	if err := exec.CommandContext(job.ctx, "tar", "-xjf", tbz2File, "-C", workDir).Run(); err != nil {
+		emitErr(fmt.Errorf("extract main: %w", err)); return
+	}
+
+	emitStep("Locating host_overlay_deployed.tbz2...")
+	bTbz2Path := ""
+	filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return nil }
+		if info.Name() == "host_overlay_deployed.tbz2" { bTbz2Path = path; return filepath.SkipDir }
+		return nil
+	})
+	if bTbz2Path == "" { emitErr(fmt.Errorf("host_overlay_deployed.tbz2 not found")); return }
+
+	emitStep("Extracting host overlay...")
+	hostOverlayDir := filepath.Join(workDir, "host_overlay")
+	os.Mkdir(hostOverlayDir, 0755)
+	if err := exec.CommandContext(job.ctx, "tar", "-xjf", bTbz2Path, "-C", hostOverlayDir).Run(); err != nil {
+		emitErr(fmt.Errorf("extract overlay: %w", err)); return
+	}
+
+	emitStep("Searching for display-t234-dce-log.elf...")
+	elfPath := ""
+	filepath.Walk(hostOverlayDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return nil }
+		if info.Name() == "display-t234-dce-log.elf" { elfPath = path; return filepath.SkipDir }
+		return nil
+	})
+	if elfPath == "" { emitErr(fmt.Errorf("ELF not found in overlay")); return }
+
+	emitStep("Extracting Build ID from ELF...")
+	buildID, err := extractBuildIDFromELF(elfPath)
+	if err != nil || buildID == "" { emitErr(fmt.Errorf("extract build id failed")); return }
+
+	emitStep("Reading ELF bytes...")
+	elfBytes, err := os.ReadFile(elfPath)
+	if err != nil { emitErr(fmt.Errorf("read elf: %w", err)); return }
+	elfName := fmt.Sprintf("display-t234-dce-log.elf__%s__%s", job.Pushtag, buildID)
+
+	emitStep("Storing ELF to database...")
+	if err := storeELF(buildID, elfName, elfBytes); err != nil { emitErr(fmt.Errorf("store elf: %w", err)); return }
+
+	emitStep("Completed.")
+	emitDone(buildID, elfName)
+}
+
+// cancel a running by-URL job
+func adminElvesByURLCancelHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "Only POST is supported.", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("jobId")
+	if jobID == "" {
+		writeJSONError(w, "Missing jobId.", http.StatusBadRequest)
+		return
+	}
+	job, ok := byURLJobs.Get(jobID)
+	if !ok {
+		writeJSONError(w, "job not found.", http.StatusNotFound)
+		return
+	}
+	if job.Status != JobRunning {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "job not running"})
+		return
+	}
+	// cancel context; goroutine will emit error and exit
+	job.cancelFunc()
+	job.broadcast(ByURLEvent{Type: "error", Message: "cancelled by user", StepIndex: job.StepIndex, TotalSteps: job.Total})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "cancel requested"})
+}
+
+// clear a job (only if not running)
+func adminElvesByURLClearHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "Only POST is supported.", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("jobId")
+	if jobID == "" {
+		writeJSONError(w, "Missing jobId.", http.StatusBadRequest)
+		return
+	}
+	job, ok := byURLJobs.Get(jobID)
+	if !ok {
+		// already cleared
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "job not found; treated as cleared"})
+		return
+	}
+	if job.Status == JobRunning {
+		writeJSONError(w, "cannot clear a running job; cancel first", http.StatusBadRequest)
+		return
+	}
+	byURLJobs.Remove(jobID)
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "job cleared"})
+}
+// POST {pushtag,url} -> start or reuse job; returns jobId
+func adminElvesByURLStartHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "Only POST is supported.", http.StatusMethodNotAllowed)
+		return
+	}
+	var req PushtagMapping
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "Invalid request body.", http.StatusBadRequest)
+		return
+	}
+	if req.Pushtag == "" || req.URL == "" {
+		writeJSONError(w, "Pushtag and URL cannot be empty.", http.StatusBadRequest)
+		return
+	}
+	job, created := byURLJobs.GetOrCreate(req.Pushtag, req.URL)
+	if created {
+		go performByURLJob(job)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"jobId":   job.ID,
+		"created": created,
+	})
+}
+
+// GET ?jobId=... -> current snapshot of a job
+func adminElvesByURLStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		writeJSONError(w, "Only GET is supported.", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("jobId")
+	if jobID == "" {
+		writeJSONError(w, "Missing jobId.", http.StatusBadRequest)
+		return
+	}
+	job, ok := byURLJobs.Get(jobID)
+	if !ok {
+		writeJSONError(w, "job not found.", http.StatusNotFound)
+		return
+	}
+	snap := job.snapshot()
+	var payload map[string]interface{}
+	_ = json.Unmarshal([]byte(snap.Message), &payload)
+	payload["success"] = true
+	payload["jobId"] = job.ID
+	json.NewEncoder(w).Encode(payload)
+}
+
+// SSE streaming of progress for fetch-by-url (by jobId or by pushtag+url)
 func adminElvesByURLStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, "Only GET is supported.", http.StatusMethodNotAllowed)
@@ -198,84 +373,63 @@ func adminElvesByURLStreamHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	pushtag := r.URL.Query().Get("pushtag")
-	srcURL := r.URL.Query().Get("url")
-	if pushtag == "" || srcURL == "" {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", "Missing pushtag or url")
-		flusher.Flush()
-		return
+	jobID := r.URL.Query().Get("jobId")
+	var job *ByURLJob
+	if jobID != "" {
+		var ok bool
+		job, ok = byURLJobs.Get(jobID)
+		if !ok {
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", "job not found")
+			flusher.Flush()
+			return
+		}
+	} else {
+		// backward-compat: accept pushtag & url to create or reuse job
+		pushtag := r.URL.Query().Get("pushtag")
+		srcURL := r.URL.Query().Get("url")
+		if pushtag == "" || srcURL == "" {
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", "Missing jobId or (pushtag,url)")
+			flusher.Flush()
+			return
+		}
+		var created bool
+		job, created = byURLJobs.GetOrCreate(pushtag, srcURL)
+		if created {
+			go performByURLJob(job)
+		}
 	}
 
-	sendStep := func(msg string) {
-		fmt.Fprintf(w, "event: step\ndata: %s\n\n", msg)
-		flusher.Flush()
+	// subscribe and stream events
+	ch := job.addSubscriber()
+	defer job.removeSubscriber(ch)
+
+	// initial snapshot sent implicitly by addSubscriber via catch-up; also send meta jobId
+	meta := map[string]string{"jobId": job.ID}
+	b, _ := json.Marshal(meta)
+	fmt.Fprintf(w, "event: meta\ndata: %s\n\n", string(b))
+	flusher.Flush()
+
+	notify := w.(http.CloseNotifier).CloseNotify()
+	for {
+		select {
+		case ev := <-ch:
+			switch ev.Type {
+			case "step":
+				fmt.Fprintf(w, "event: step\ndata: %s\n\n", ev.Message)
+			case "error":
+				fmt.Fprintf(w, "event: error\ndata: %s\n\n", ev.Message)
+			case "done":
+				payload := map[string]string{"buildId": ev.BuildID, "elfFileName": ev.ElfName}
+				b, _ := json.Marshal(payload)
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", string(b))
+			case "snapshot":
+				// not used here
+			}
+			flusher.Flush()
+		case <-notify:
+			return
+		}
 	}
-	sendError := func(err error) {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-		flusher.Flush()
-	}
-	sendDone := func(buildID, elfName string) {
-		payload := map[string]string{"buildId": buildID, "elfFileName": elfName}
-		b, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "event: done\ndata: %s\n\n", string(b))
-		flusher.Flush()
-	}
-
-	sendStep("Creating temp workspace...")
-	workDir, err := ioutil.TempDir("", "dce-elf-fetch-")
-	if err != nil { sendError(fmt.Errorf("temp dir: %w", err)); return }
-	defer os.RemoveAll(workDir)
-
-	sendStep("Downloading full_linux_for_tegra.tbz2...")
-	tbz2File := filepath.Join(workDir, "full_linux_for_tegra.tbz2")
-	if err := exec.Command("curl", "-L", fmt.Sprintf("%s/full_linux_for_tegra.tbz2", srcURL), "-o", tbz2File).Run(); err != nil {
-		sendError(fmt.Errorf("download failed: %w", err)); return
-	}
-
-	sendStep("Extracting main archive...")
-	if err := exec.Command("tar", "-xjf", tbz2File, "-C", workDir).Run(); err != nil {
-		sendError(fmt.Errorf("extract main: %w", err)); return
-	}
-
-	sendStep("Locating host_overlay_deployed.tbz2...")
-	bTbz2Path := ""
-	filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil { return nil }
-		if info.Name() == "host_overlay_deployed.tbz2" { bTbz2Path = path; return filepath.SkipDir }
-		return nil
-	})
-	if bTbz2Path == "" { sendError(fmt.Errorf("host_overlay_deployed.tbz2 not found")); return }
-
-	sendStep("Extracting host overlay...")
-	hostOverlayDir := filepath.Join(workDir, "host_overlay")
-	os.Mkdir(hostOverlayDir, 0755)
-	if err := exec.Command("tar", "-xjf", bTbz2Path, "-C", hostOverlayDir).Run(); err != nil {
-		sendError(fmt.Errorf("extract overlay: %w", err)); return
-	}
-
-	sendStep("Searching for display-t234-dce-log.elf...")
-	elfPath := ""
-	filepath.Walk(hostOverlayDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil { return nil }
-		if info.Name() == "display-t234-dce-log.elf" { elfPath = path; return filepath.SkipDir }
-		return nil
-	})
-	if elfPath == "" { sendError(fmt.Errorf("ELF not found in overlay")); return }
-
-	sendStep("Extracting Build ID from ELF...")
-	buildID, err := extractBuildIDFromELF(elfPath)
-	if err != nil || buildID == "" { sendError(fmt.Errorf("extract build id failed")); return }
-
-	sendStep("Reading ELF bytes...")
-	elfBytes, err := os.ReadFile(elfPath)
-	if err != nil { sendError(fmt.Errorf("read elf: %w", err)); return }
-	elfName := fmt.Sprintf("display-t234-dce-log.elf__%s__%s", pushtag, buildID)
-
-	sendStep("Storing ELF to database...")
-	if err := storeELF(buildID, elfName, elfBytes); err != nil { sendError(fmt.Errorf("store elf: %w", err)); return }
-
-	sendStep("Completed.")
-	sendDone(buildID, elfName)
 }
 
 // adminElvesUploadHandler: POST multipart form with field 'elf'

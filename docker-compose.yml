@@ -18,6 +18,10 @@ services:
       # format: user:password@tcp(host:port)/database?parseTime=true
       - MYSQL_DSN=dce_user:dce_pass@tcp(mariadb:3306)/dce_logs?parseTime=true
       - JWT_SECRET=dev-secret
+      # By-URL Job TTL/cleanup (recommended defaults; can be tuned)
+      - BYURL_JOB_FINISHED_TTL=30m
+      - BYURL_JOB_RUNNING_TTL=12h
+      - BYURL_JOB_REAPER_INTERVAL=1m
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
       interval: 10s

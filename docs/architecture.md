@@ -87,7 +87,10 @@
   - `GET /api/admin/elves` → `[ { buildId, elfFileName }, ... ]`
   - `DELETE /api/admin/elves?buildId=<id>`
   - `POST /api/admin/elves/upload` (multipart `elf`)
-  - `POST /api/admin/elves/by-url` (JSON `{pushtag,url}`), and `GET /api/admin/elves/by-url/stream?pushtag=...&url=...` (SSE progress)
+  - `POST /api/admin/elves/by-url` (legacy, JSON `{pushtag,url}`), and streaming/status endpoints for long-running by-URL flow:
+    - `POST /api/admin/elves/by-url/start` → `{ success, jobId, created }`（建立或重用背景任務）
+    - `GET /api/admin/elves/by-url/status?jobId=...` → 即時快照（`{ success, status, steps[], stepIndex, totalSteps, buildId?, elfName? }`）
+    - `GET /api/admin/elves/by-url/stream?jobId=...` → SSE 進度（`step|error|done`）
     - SSE client hint: set `Accept: text/event-stream` to receive progress events (`event: step|error|done`).
 - Health
   - `GET /healthz` → 200 OK
@@ -103,8 +106,12 @@
   | `/api/admin/elves` | GET | Bearer (admin) | List ELF records (`buildId, elfFileName`). |
   | `/api/admin/elves?buildId=<id>` | DELETE | Bearer (admin) | Delete an ELF record by `buildId`. |
   | `/api/admin/elves/upload` | POST | Bearer (admin) | Upload a single `.elf` (field: `elf`), read GNU Build ID, and upsert into DB. |
-  | `/api/admin/elves/by-url` | POST | Bearer (admin) | With `{pushtag,url}`, download/extract artifacts, locate `display-t234-dce-log.elf`, extract Build ID, and store in DB. |
-  | `/api/admin/elves/by-url/stream?pushtag=...&url=...` | GET | Bearer (admin) | SSE progress for the by-URL flow (`step|error|done`). |
+  | `/api/admin/elves/by-url` | POST | Bearer (admin) | Legacy non-stream flow with `{pushtag,url}`. |
+  | `/api/admin/elves/by-url/start` | POST | Bearer (admin) | Start/reuse background by-URL job; returns `jobId`. |
+  | `/api/admin/elves/by-url/status?jobId=<id>` | GET | Bearer (admin) | Get current snapshot of a job (`steps`, `status`, progress). |
+  | `/api/admin/elves/by-url/stream?jobId=<id>` | GET | Bearer (admin) | SSE progress for the by-URL flow (`step|error|done`). |
+  | `/api/admin/elves/by-url/cancel?jobId=<id>` | POST | Bearer (admin) | Cancel a running by-URL job; SSE will emit `error: cancelled by user`. |
+  | `/api/admin/elves/by-url/clear?jobId=<id>` | POST | Bearer (admin) | Remove a non-running job from memory (UI “Clear”). |
   | `/healthz` | GET | None | Backend health check (200 OK). |
   | `/nginx-health` | GET | None | Frontend (Nginx) health check (200 OK; access_log off). |
 ---
@@ -177,7 +184,9 @@ This module provides a complete workflow to ingest, store, and curate the DCE de
       - Otherwise, it is normalized to `display-t234-dce-log.elf__<buildId>`.
     - Stores the full binary in DB with upsert semantics.
     - Response JSON: `{ success, buildId, elfFileName }`.
-  - `POST /api/admin/elves/by-url` (JSON `{pushtag,url}`) and `GET /api/admin/elves/by-url/stream?pushtag=...&url=...`
+  - `POST /api/admin/elves/by-url/start` (create/reuse a background job with `{pushtag,url}`, returns `jobId`),
+    `GET /api/admin/elves/by-url/status?jobId=...` (snapshot),
+    `GET /api/admin/elves/by-url/stream?jobId=...` (SSE progress)
     - Download `full_linux_for_tegra.tbz2` from `<url>`, extract, locate `host_overlay_deployed.tbz2`, extract overlay, and find `display-t234-dce-log.elf`.
     - Extract Build ID (as above), read bytes, upsert into DB.
     - The `/stream` variant emits Server-Sent Events (SSE) to report progress:
@@ -227,7 +236,19 @@ This module provides a complete workflow to ingest, store, and curate the DCE de
   - Upload ELF
     - File picker for `.elf`; upon success, shows the resolved Build ID, clears the input, and refreshes the list.
   - Fetch ELF by URL
-    - Inputs: `pushtag`, `url`; show live progress via SSE and persist the progress to `localStorage` (key: `dce_by_url_state`) so a page refresh does not lose context; a "Clear" button resets the saved progress.
+    - Inputs: `pushtag`, `url`; after submit, call `/start` to obtain `jobId`, persist `jobId` + steps to `localStorage` (key: `dce_by_url_state`), then connect to `/stream` with `jobId`. On page refresh, call `/status` to restore, then auto-resubscribe to SSE until `done/error`.
+    - Progress bar uses the known total step count (currently 11 steps).
+    - While running:
+      - “Fetch & Store” is disabled.
+      - Show a “Stop” button to cancel (calls `/cancel`).
+      - “Clear” is disabled; it becomes enabled only after completion or cancellation (calls `/clear` and removes `localStorage`).
+  
+  - Job TTL (auto-reaping)
+    - Background jobs are retained in memory for a period to support refresh/resume.
+    - Defaults (configurable via environment variables):
+      - `BYURL_JOB_FINISHED_TTL=30m`: remove a `done/error` job 30 minutes after its last update.
+      - `BYURL_JOB_RUNNING_TTL=12h`: if a `running` job has no updates for 12 hours, time it out and emit `error`, then remove.
+      - `BYURL_JOB_REAPER_INTERVAL=1m`: reaper sweep frequency.
   - List & Delete
     - Displays `Build ID` and `ELF File Name`; provides a Delete action (with confirmation, then calls `DELETE`).
 
@@ -269,6 +290,10 @@ This module provides a complete workflow to ingest, store, and curate the DCE de
 - Backend
   - Listen port: fixed at `8080` (via code). No `APP_ENV`/`LOG_LEVEL` flags at present.
   - Upload handling: multipart parsed with ~100MB in-memory threshold; large files spill to disk; Nginx hard cap is 512MB.
+  - By-URL background jobs (TTL/cleanup; configurable via env):
+    - `BYURL_JOB_FINISHED_TTL` (default `30m`)
+    - `BYURL_JOB_RUNNING_TTL` (default `12h`)
+    - `BYURL_JOB_REAPER_INTERVAL` (default `1m`)
 - Auth
   - `JWT_SECRET`: HS256 signing key for JWT issuance/verification (required in non-dev).
 - Database
@@ -491,13 +516,28 @@ This section provides command-focused guidance for developers/operators to build
   ```
 - Admin: fetch by URL (non-stream + stream)
   ```bash
-  curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-    -X POST http://localhost:3000/api/admin/elves/by-url \
-    -d '{"pushtag":"r36-abc","url":"http://.../r36-abc/latest"}' | jq
+  # Start a background job and capture jobId
+  JOB_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -X POST http://localhost:3000/api/admin/elves/by-url/start \
+    -d '{"pushtag":"r36-abc","url":"http://.../r36-abc/latest"}')
+  echo "$JOB_JSON" | jq
+  JOB_ID=$(echo "$JOB_JSON" | jq -r .jobId)
 
-  # Stream progress (SSE); watch raw events:
+  # Check status snapshot
+  curl -s -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:3000/api/admin/elves/by-url/status?jobId=${JOB_ID}" | jq
+
+  # Stream progress (SSE) with jobId; watch raw events:
   curl -N -H "Authorization: Bearer $TOKEN" \
-    "http://localhost:3000/api/admin/elves/by-url/stream?pushtag=r36-abc&url=http://.../r36-abc/latest"
+    "http://localhost:3000/api/admin/elves/by-url/stream?jobId=${JOB_ID}"
+
+  # Optional: cancel a running job
+  curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:3000/api/admin/elves/by-url/cancel?jobId=${JOB_ID}" | jq
+
+  # Optional: clear a finished/cancelled job
+  curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+    "http://localhost:3000/api/admin/elves/by-url/clear?jobId=${JOB_ID}" | jq
   ```
 - Decode upload (user flow): only the file is required; Build ID is auto-detected
   ```bash

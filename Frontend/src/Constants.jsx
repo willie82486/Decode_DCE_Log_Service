@@ -5,6 +5,10 @@ export const API_ADMIN_USERS_URL = '/api/admin/users';
 export const API_ADMIN_ELVES_URL = '/api/admin/elves';
 export const API_ADMIN_ELVES_UPLOAD_URL = '/api/admin/elves/upload';
 export const API_ADMIN_ELVES_BY_URL_STREAM_URL = '/api/admin/elves/by-url/stream';
+export const API_ADMIN_ELVES_BY_URL_START_URL = '/api/admin/elves/by-url/start';
+export const API_ADMIN_ELVES_BY_URL_STATUS_URL = '/api/admin/elves/by-url/status';
+export const API_ADMIN_ELVES_BY_URL_CANCEL_URL = '/api/admin/elves/by-url/cancel';
+export const API_ADMIN_ELVES_BY_URL_CLEAR_URL = '/api/admin/elves/by-url/clear';
 // Helper: build Authorization header
 export const authHeader = (token) => token ? { 'Authorization': `Bearer ${token}` } : {};
 

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { StatusMessage, API_ADMIN_USERS_URL, API_ADMIN_ELVES_URL, API_ADMIN_ELVES_UPLOAD_URL, API_ADMIN_ELVES_BY_URL_STREAM_URL, authHeader } from './Constants.jsx'; 
+import { StatusMessage, API_ADMIN_USERS_URL, API_ADMIN_ELVES_URL, API_ADMIN_ELVES_UPLOAD_URL, API_ADMIN_ELVES_BY_URL_STREAM_URL, API_ADMIN_ELVES_BY_URL_START_URL, API_ADMIN_ELVES_BY_URL_STATUS_URL, API_ADMIN_ELVES_BY_URL_CANCEL_URL, API_ADMIN_ELVES_BY_URL_CLEAR_URL, authHeader } from './Constants.jsx'; 
 
 const AdminPage = ({ userId, token }) => {
     const [newUsername, setNewUsername] = useState('');
@@ -8,7 +8,10 @@ const AdminPage = ({ userId, token }) => {
 
     const [users, setUsers] = useState([]);
     const [status, setStatus] = useState({ message: '', type: 'info' });
-    const [isLoading, setIsLoading] = useState(false);
+    // Split loading states to avoid cross-form interference
+    const [isAddUserLoading, setIsAddUserLoading] = useState(false);
+    const [isByUrlLoading, setIsByUrlLoading] = useState(false);
+    const [isUploadLoading, setIsUploadLoading] = useState(false);
     const [isFetching, setIsFetching] = useState(true); 
 
     const [pushtag, setPushtag] = useState('');
@@ -46,7 +49,7 @@ const AdminPage = ({ userId, token }) => {
             setStatus({ message: "Username and password cannot be empty.", type: 'error' });
             return;
         }
-        setIsLoading(true);
+        setIsAddUserLoading(true);
         setStatus({ message: "Sending new user data to Go backend...", type: 'info' });
         try {
             const response = await fetch(API_ADMIN_USERS_URL, {
@@ -67,7 +70,7 @@ const AdminPage = ({ userId, token }) => {
             console.error("Error adding user via API: ", error);
             setStatus({ message: `Error adding user: ${error.message}`, type: 'error' });
         } finally {
-            setIsLoading(false);
+            setIsAddUserLoading(false);
         }
     }, [newUsername, newPassword, newRole, fetchUsers, token]);
 
@@ -108,22 +111,33 @@ const AdminPage = ({ userId, token }) => {
             setStatus({ message: "Pushtag and URL cannot be empty.", type: 'error' });
             return;
         }
-        setIsLoading(true);
+        setIsByUrlLoading(true);
         try {
-            // Use fetch to include Authorization header and manually parse SSE
-            const initialSteps = ['Starting...'];
-            setByUrlSteps(initialSteps);
+            // Start or reuse job on backend
+            const startResp = await fetch(API_ADMIN_ELVES_BY_URL_START_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeader(token) },
+                body: JSON.stringify({ pushtag, url: pushtagUrl }),
+            });
+            const startJson = await startResp.json();
+            if (!startResp.ok || !startJson.success || !startJson.jobId) {
+                throw new Error(startJson.message || `Failed to start job: ${startResp.status}`);
+            }
+            const jobId = startJson.jobId;
+            // Do not pre-seed steps; rely on SSE catch-up to avoid duplicates
+            setByUrlSteps([]);
             // Persist progress (prevent loss on page refresh F5)
             localStorage.setItem(BY_URL_STATE_KEY, JSON.stringify({
+                jobId,
                 pushtag,
                 url: pushtagUrl,
-                steps: initialSteps,
+                steps: [],
                 status: 'running',
                 startedAt: Date.now(),
             }));
             const controller = new AbortController();
             streamAbortRef.current = controller;
-            const resp = await fetch(`${API_ADMIN_ELVES_BY_URL_STREAM_URL}?pushtag=${encodeURIComponent(pushtag)}&url=${encodeURIComponent(pushtagUrl)}`, {
+            const resp = await fetch(`${API_ADMIN_ELVES_BY_URL_STREAM_URL}?jobId=${encodeURIComponent(jobId)}`, {
                 method: 'GET',
                 headers: { ...authHeader(token), 'Accept': 'text/event-stream' },
                 signal: controller.signal,
@@ -134,6 +148,8 @@ const AdminPage = ({ userId, token }) => {
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            // Skip server catch-up events equal to current steps length to avoid duplication
+            let catchUpRemaining = 0;
             const processChunk = (text) => {
                 buffer += text;
                 let idx;
@@ -152,7 +168,15 @@ const AdminPage = ({ userId, token }) => {
                         }
                     });
                     const data = dataLines.join('\\n');
+                    if (eventType === 'meta') {
+                        // ignore meta
+                        continue;
+                    }
                     if (eventType === 'step') {
+                        if (catchUpRemaining > 0) {
+                            catchUpRemaining--;
+                            continue;
+                        }
                         setByUrlSteps(prev => {
                             const next = [...prev, data];
                             const saved = localStorage.getItem(BY_URL_STATE_KEY);
@@ -179,7 +203,7 @@ const AdminPage = ({ userId, token }) => {
                             } catch {}
                         }
                         controller.abort();
-                        setIsLoading(false);
+                        setIsByUrlLoading(false);
                     } else if (eventType === 'done') {
                         try { JSON.parse(data); } catch {}
                         setStatus({ message: `ELF fetched and stored.`, type: 'success' });
@@ -196,7 +220,7 @@ const AdminPage = ({ userId, token }) => {
                             } catch {}
                         }
                         controller.abort();
-                        setIsLoading(false);
+                        setIsByUrlLoading(false);
                     }
                 }
             };
@@ -207,24 +231,167 @@ const AdminPage = ({ userId, token }) => {
             }
         } catch (err) {
             setStatus({ message: `Error fetching ELF by URL: ${err.message}`, type: 'error' });
-            setIsLoading(false);
+            setIsByUrlLoading(false);
         }
     }, [pushtag, pushtagUrl, fetchElves, token]);
 
     // Restore "Fetch by URL" progress on mount (avoid loss after F5)
     useEffect(() => {
+        (async () => {
+            try {
+                const saved = localStorage.getItem(BY_URL_STATE_KEY);
+                if (!saved) return;
+                const obj = JSON.parse(saved);
+                if (Array.isArray(obj.steps)) {
+                    setByUrlSteps(obj.steps);
+                }
+                if (obj.status === 'running' && obj.jobId) {
+                    // Fetch latest snapshot and then resume SSE
+                    try {
+                        const res = await fetch(`${API_ADMIN_ELVES_BY_URL_STATUS_URL}?jobId=${encodeURIComponent(obj.jobId)}`, {
+                            headers: { ...authHeader(token) },
+                        });
+                        const js = await res.json();
+                        if (res.ok && js.success) {
+                            if (Array.isArray(js.steps)) setByUrlSteps(js.steps);
+                            setIsByUrlLoading(true);
+                            const controller = new AbortController();
+                            streamAbortRef.current = controller;
+                            const resp = await fetch(`${API_ADMIN_ELVES_BY_URL_STREAM_URL}?jobId=${encodeURIComponent(obj.jobId)}`, {
+                                method: 'GET',
+                                headers: { ...authHeader(token), 'Accept': 'text/event-stream' },
+                                signal: controller.signal,
+                            });
+                            if (resp.ok && resp.body) {
+                                const reader = resp.body.getReader();
+                                const decoder = new TextDecoder();
+                                let buffer = '';
+                                let catchUpRemaining = Array.isArray(js.steps) ? js.steps.length : 0;
+                                const processChunk = (text) => {
+                                    buffer += text;
+                                    let idx;
+                                    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                                        const rawEvent = buffer.slice(0, idx);
+                                        buffer = buffer.slice(idx + 2);
+                                        let eventType = 'message';
+                                        let dataLines = [];
+                                        rawEvent.split('\n').forEach(line => {
+                                            if (line.startsWith('event:')) eventType = line.slice(6).trim();
+                                            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+                                        });
+                                        const data = dataLines.join('\\n');
+                                        if (eventType === 'meta') continue;
+                                        if (eventType === 'step') {
+                                            if (catchUpRemaining > 0) { catchUpRemaining--; continue; }
+                                            setByUrlSteps(prev => {
+                                                const next = [...prev, data];
+                                                const saved2 = localStorage.getItem(BY_URL_STATE_KEY);
+                                                if (saved2) {
+                                                    try {
+                                                        const o2 = JSON.parse(saved2);
+                                                        o2.steps = next; o2.status = 'running';
+                                                        localStorage.setItem(BY_URL_STATE_KEY, JSON.stringify(o2));
+                                                    } catch {}
+                                                }
+                                                return next;
+                                            });
+                                        } else if (eventType === 'error') {
+                                            setStatus({ message: `Fetch by URL failed: ${data}`, type: 'error' });
+                                            const saved2 = localStorage.getItem(BY_URL_STATE_KEY);
+                                            if (saved2) {
+                                                try {
+                                                    const o2 = JSON.parse(saved2);
+                                                    o2.steps = [...(o2.steps || []), `Error: ${data}`];
+                                                    o2.status = 'error';
+                                                    localStorage.setItem(BY_URL_STATE_KEY, JSON.stringify(o2));
+                                                } catch {}
+                                            }
+                                            controller.abort();
+                                            setIsByUrlLoading(false);
+                                        } else if (eventType === 'done') {
+                                            try { JSON.parse(data); } catch {}
+                                            setStatus({ message: `ELF fetched and stored.`, type: 'success' });
+                                            fetchElves();
+                                            const saved2 = localStorage.getItem(BY_URL_STATE_KEY);
+                                            if (saved2) {
+                                                try {
+                                                    const o2 = JSON.parse(saved2);
+                                                    o2.steps = [...(o2.steps || []), 'Completed.'];
+                                                    o2.status = 'done';
+                                                    localStorage.setItem(BY_URL_STATE_KEY, JSON.stringify(o2));
+                                                } catch {}
+                                            }
+                                            controller.abort();
+                                            setIsByUrlLoading(false);
+                                        }
+                                    }
+                                };
+                                while (true) {
+                                    const { done, value } = await reader.read();
+                                    if (done) break;
+                                    processChunk(decoder.decode(value, { stream: true }));
+                                }
+                            } else {
+                                setIsByUrlLoading(false);
+                            }
+                        }
+                    } catch {
+                        setIsByUrlLoading(false);
+                    }
+                }
+            } catch {}
+        })();
+    }, [token]);
+
+    const handleCancelByUrl = useCallback(async () => {
+        try {
+            const saved = localStorage.getItem(BY_URL_STATE_KEY);
+            if (!saved) return;
+            const obj = JSON.parse(saved);
+            if (!obj.jobId) return;
+            await fetch(`${API_ADMIN_ELVES_BY_URL_CANCEL_URL}?jobId=${encodeURIComponent(obj.jobId)}`, {
+                method: 'POST',
+                headers: { ...authHeader(token) },
+            });
+            if (streamAbortRef.current) {
+                try { streamAbortRef.current.abort(); } catch {}
+            }
+            setStatus({ message: "Fetch by URL canceled.", type: 'warning' });
+            setIsByUrlLoading(false);
+            setByUrlSteps(prev => {
+                const next = [...prev, 'Canceled by user.'];
+                const saved2 = localStorage.getItem(BY_URL_STATE_KEY);
+                if (saved2) {
+                    try {
+                        const o2 = JSON.parse(saved2);
+                        o2.steps = next; o2.status = 'error';
+                        localStorage.setItem(BY_URL_STATE_KEY, JSON.stringify(o2));
+                    } catch {}
+                }
+                return next;
+            });
+        } catch (e) {
+            setStatus({ message: `Cancel failed: ${e.message}`, type: 'error' });
+        }
+    }, [token]);
+
+    const handleClearByUrl = useCallback(async () => {
         try {
             const saved = localStorage.getItem(BY_URL_STATE_KEY);
             if (saved) {
                 const obj = JSON.parse(saved);
-                if (Array.isArray(obj.steps) && obj.steps.length > 0) {
-                    setByUrlSteps(obj.steps);
+                if (obj.jobId) {
+                    await fetch(`${API_ADMIN_ELVES_BY_URL_CLEAR_URL}?jobId=${encodeURIComponent(obj.jobId)}`, {
+                        method: 'POST',
+                        headers: { ...authHeader(token) },
+                    }).catch(() => {});
                 }
-                // Do not auto-resume the request to avoid duplicate downloads; restore UI only
-                // If needed in future, resume logic can be added here
             }
-        } catch {}
-    }, []);
+        } finally {
+            localStorage.removeItem(BY_URL_STATE_KEY);
+            setByUrlSteps([]);
+        }
+    }, [token]);
 
     const handleUploadElf = useCallback(async (e) => {
         e.preventDefault();
@@ -232,7 +399,7 @@ const AdminPage = ({ userId, token }) => {
             setStatus({ message: "Please choose an ELF file to upload.", type: 'error' });
             return;
         }
-        setIsLoading(true);
+        setIsUploadLoading(true);
         try {
             const form = new FormData();
             form.append('elf', elfUploadFile);
@@ -248,7 +415,7 @@ const AdminPage = ({ userId, token }) => {
         } catch (err) {
             setStatus({ message: `Error uploading ELF: ${err.message}`, type: 'error' });
         } finally {
-            setIsLoading(false);
+            setIsUploadLoading(false);
         }
     }, [elfUploadFile, fetchElves, token]);
 
@@ -309,9 +476,9 @@ const AdminPage = ({ userId, token }) => {
                             <option value="admin">admin</option>
                         </select>
                     </div>
-                    <button type="submit" disabled={isLoading}
+                    <button type="submit" disabled={isAddUserLoading}
                         className="w-full py-2.5 px-4 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 transition duration-150 disabled:opacity-50 shadow-md">
-                        {isLoading ? 'Adding ...' : 'Add User'}
+                        {isAddUserLoading ? 'Adding ...' : 'Add User'}
                     </button>
                 </form>
 
@@ -374,19 +541,31 @@ const AdminPage = ({ userId, token }) => {
                             className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 md:col-span-3" />
                         <input type="url" placeholder="URL (e.g. http://.../pushtag/latest)" required value={pushtagUrl} onChange={e => setPushtagUrl(e.target.value)}
                             className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 md:col-span-7" />
-                        <button type="submit" className="w-full md:w-auto md:col-span-2 px-4 py-2 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 shadow-md">Fetch & Store</button>
+                        <button type="submit" disabled={isByUrlLoading} className="w-full md:w-auto md:col-span-2 px-4 py-2 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 shadow-md disabled:opacity-50">
+                            {isByUrlLoading ? 'Fetching ...' : 'Fetch & Store'}
+                        </button>
+                        {isByUrlLoading && (
+                            <button type="button" onClick={handleCancelByUrl} className="w-full md:w-auto md:col-span-2 px-4 py-2 rounded-xl text-white bg-gradient-to-r from-red-500 to-rose-500 hover:from-red-600 hover:to-rose-600 shadow-md">
+                                Stop
+                            </button>
+                        )}
                     </div>
                     {byUrlSteps.length > 0 && (
                         <div className="mt-3 p-3 bg-white rounded-lg border">
                             <div className="text-sm font-medium text-gray-700 mb-2">Progress</div>
+                            {/* simple progress bar based on known steps */}
+                            <div className="w-full h-2 bg-gray-200 rounded">
+                                <div className="h-2 bg-indigo-600 rounded" style={{ width: `${Math.min(100, Math.round((byUrlSteps.length / 11) * 100))}%` }} />
+                            </div>
                             <ul className="list-disc list-inside text-sm text-gray-700 space-y-1 max-h-60 overflow-auto">
                                 {byUrlSteps.map((s, idx) => (<li key={idx}>{s}</li>))}
                             </ul>
                             <div className="mt-2 flex justify-end">
                                 <button
                                     type="button"
-                                    onClick={() => { setByUrlSteps([]); localStorage.removeItem(BY_URL_STATE_KEY); }}
-                                    className="px-3 py-1 text-xs rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700"
+                                    onClick={handleClearByUrl}
+                                    disabled={isByUrlLoading}
+                                    className="px-3 py-1 text-xs rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50"
                                 >
                                     Clear
                                 </button>
@@ -401,7 +580,9 @@ const AdminPage = ({ userId, token }) => {
                         <input ref={fileInputRef} type="file" accept=".elf" onChange={e => setElfUploadFile(e.target.files?.[0] || null)}
                             className="w-full px-3 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 bg-white md:col-span-10" />
                         <div className="md:col-span-2 flex items-center">
-                            <button type="submit" className="w-full px-4 py-2 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 shadow-md disabled:opacity-50" disabled={isLoading}>Upload & Store</button>
+                            <button type="submit" className="w-full px-4 py-2 rounded-xl text-white bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 shadow-md disabled:opacity-50" disabled={isUploadLoading}>
+                                {isUploadLoading ? 'Uploading ...' : 'Upload & Store'}
+                            </button>
                         </div>
                     </div>
                 </form>

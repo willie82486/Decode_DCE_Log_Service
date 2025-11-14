@@ -1,6 +1,6 @@
 ## Differences vs Previous Architecture Document
 
-Reference (previous version): `https://raw.githubusercontent.com/willie82486/Decode_DCE_Log_Service/main/docs/architecture.md`
+Reference (previous version): `https://github.com/willie82486/Decode_DCE_Log_Service/blob/0f9ad833fd7423a80876ef197fdfc1d11743035a/docs/architecture.md`
 
 - Decode input
   - Previous: User must provide `pushtag` and `buildId` with the uploaded `dce-enc.log`.
@@ -22,9 +22,17 @@ Reference (previous version): `https://raw.githubusercontent.com/willie82486/Dec
   - Now (ELF Library Management expanded & revised):
     - Data model changed to `build_elves (build_id PK, elf_filename, elf_blob, created_at)` with upsert semantics.
     - Upload flow (`POST /api/admin/elves/upload`): extracts Build ID from ELF; preserves filename if matches `display-t234-dce-log.elf__<pushtag>__<40hex>`, else normalizes to `display-t234-dce-log.elf__<buildId>`; stores full blob.
-    - Fetch-by-URL flow (`/elves/by-url` + `/elves/by-url/stream`): downloads `full_linux_for_tegra.tbz2`, extracts overlay, locates `display-t234-dce-log.elf`, extracts Build ID, stores blob; SSE emits `step`/`error`/`done` with final `{buildId, elfFileName}`.
+    - Fetch-by-URL flow (upgraded to background jobs):
+      - Previous: Triggered directly via `/elves/by-url` and observed via `/elves/by-url/stream?pushtag=...&url=...`; prone to interruption after page refresh; no cancellation.
+      - Now: Runs as a resumable background job that supports resume-after-refresh, cancellation, and clearing.
+        - `POST /api/admin/elves/by-url/start` → create/reuse a job, returns `jobId`
+        - `GET /api/admin/elves/by-url/status?jobId=...` → current snapshot (steps, status, progress)
+        - `GET /api/admin/elves/by-url/stream?jobId=...` → SSE progress (`step|error|done`; includes catch-up)
+        - `POST /api/admin/elves/by-url/cancel?jobId=...` → cancel a running job (SSE will receive `error: cancelled by user`)
+        - `POST /api/admin/elves/by-url/clear?jobId=...` → clear a finished/cancelled job
+      - Work performed remains the same: download `full_linux_for_tegra.tbz2`, extract overlay, locate `display-t234-dce-log.elf`, read Build ID, store into DB; SSE still reports `step|error|done` with final `{buildId, elfFileName}`.
     - Listing & deletion: `GET /api/admin/elves` returns `{ buildId, elfFileName }` (newest first); `DELETE /api/admin/elves?buildId=...` removes entry.
-    - Admin UI: provides Upload、Fetch-by-URL（具備 SSE 進度與 localStorage 持久化）、列表與刪除操作。
+    - Admin UI: provides Upload and Fetch-by-URL (SSE progress + `localStorage` persistence + resumability), list and delete; while running, “Fetch & Store” is disabled and a “Stop” button is shown to cancel; “Clear” is enabled only after completion or cancellation; a progress bar is added. Also fixes duplicated progress after refresh (use SSE catch-up and have the client skip already-known steps).
 - Data model
   - Previous (planned): `users`, `pushtag_urls`.
   - Now (implemented): `users`, `build_elves (build_id PK, elf_filename, elf_blob, created_at)`.
@@ -34,6 +42,12 @@ Reference (previous version): `https://raw.githubusercontent.com/willie82486/Dec
 - API section
   - Previous: `POST /api/decode` required `buildId` and optionally `pushtag`.
   - Now: `POST /api/decode` requires only `file`; backend auto-extracts Build ID and returns `dce-decoded.log`.
+- Async job lifecycle & TTL (new)
+  - New: Backend adds a JobManager with TTL-based auto-reaping:
+    - `BYURL_JOB_FINISHED_TTL` (default 30m): retention window for done/error jobs
+    - `BYURL_JOB_RUNNING_TTL` (default 12h): stale timeout for running jobs with no updates
+    - `BYURL_JOB_REAPER_INTERVAL` (default 1m): sweep frequency
+  - Compose files include recommended defaults under the backend service `environment`.
 - Documentation structure
   - Updated wording across sections (Introduction, Components, APIs, Data Model, Containers) to match the auto-detection flow and current code behavior.
 
