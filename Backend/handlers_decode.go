@@ -16,6 +16,10 @@ import (
 	"strings"
 )
 
+// ------------------------------------------------------------------------------------------------	
+// ---------------- Handler Functions ----------------
+// ------------------------------------------------------------------------------------------------
+
 // extractBuildIDFromELF tries to read GNU Build ID from ELF notes via `readelf -n`.
 // Fallback: use SHA1 of file bytes if GNU Build ID is not present or tool missing.
 func extractBuildIDFromELF(elfPath string) (string, error) {

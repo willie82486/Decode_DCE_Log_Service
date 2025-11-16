@@ -8,7 +8,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// --- JWT Auth helpers ---
+// ------------------------------------------------------------------------------------------------	
+// ---------------- JWT Auth helpers ----------------
+// ------------------------------------------------------------------------------------------------
+
 func parseAndValidateToken(tokenStr string) (jwt.MapClaims, error) {
 	tok, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {

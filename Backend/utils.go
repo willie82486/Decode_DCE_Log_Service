@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"os"
 )
-
-// --- Utility Functions ---
+// ------------------------------------------------------------------------------------------------	
+// ---------------- Utility Functions ----------------
+// ------------------------------------------------------------------------------------------------
 
 // writeJSONError writes an error response in JSON format.
 func writeJSONError(w http.ResponseWriter, message string, status int) {

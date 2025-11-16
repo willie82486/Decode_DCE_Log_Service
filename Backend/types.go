@@ -1,6 +1,8 @@
 package main
 
-// --- Struct Definitions ---
+// ------------------------------------------------------------------------------------------------	
+// ---------------- Struct Definitions ----------------
+// ------------------------------------------------------------------------------------------------
 
 // ResponsePayload defines the decoded result or general response sent to the frontend.
 type ResponsePayload struct {

@@ -88,9 +88,9 @@
   - `DELETE /api/admin/elves?buildId=<id>`
   - `POST /api/admin/elves/upload` (multipart `elf`)
   - `POST /api/admin/elves/by-url` (legacy, JSON `{pushtag,url}`), and streaming/status endpoints for long-running by-URL flow:
-    - `POST /api/admin/elves/by-url/start` → `{ success, jobId, created }`（建立或重用背景任務）
-    - `GET /api/admin/elves/by-url/status?jobId=...` → 即時快照（`{ success, status, steps[], stepIndex, totalSteps, buildId?, elfName? }`）
-    - `GET /api/admin/elves/by-url/stream?jobId=...` → SSE 進度（`step|error|done`）
+    - `POST /api/admin/elves/by-url/start` → `{ success, jobId, created }` (creates or reuses a background job)
+    - `GET /api/admin/elves/by-url/status?jobId=...` → real-time snapshot (`{ success, status, steps[], stepIndex, totalSteps, buildId?, elfName? }`)
+    - `GET /api/admin/elves/by-url/stream?jobId=...` → SSE progress (`step|error|done`)
     - SSE client hint: set `Accept: text/event-stream` to receive progress events (`event: step|error|done`).
 - Health
   - `GET /healthz` → 200 OK

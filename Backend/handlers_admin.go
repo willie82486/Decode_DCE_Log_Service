@@ -12,6 +12,10 @@ import (
 	"strings"
 )
 
+// ------------------------------------------------------------------------------------------------	
+// ---------------- Handler Functions ----------------
+// ------------------------------------------------------------------------------------------------
+
 // Handles IT admin user management.
 func adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
