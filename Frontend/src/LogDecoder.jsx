@@ -67,7 +67,6 @@ const LogDecoder = ({ userId, token }) => {
       </form>
       <StatusMessage message={status.message} type={status.type} />
       <p className="mt-4 text-xs text-gray-400 text-center">
-        Operator ID: <span className="font-mono text-gray-500 break-all">{userId}</span>
       </p>
     </div>
   );

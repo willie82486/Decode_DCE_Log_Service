@@ -454,7 +454,6 @@ const AdminPage = ({ userId, token }) => {
             <div className="w-full max-w-2xl mx-auto bg-white/80 backdrop-blur p-8 rounded-2xl shadow-xl border border-white/60">
                 <h2 className="text-2xl md:text-3xl font-extrabold text-indigo-700 mb-6 tracking-tight">IT Admin User Management</h2>
                 <p className="mb-4 text-sm text-gray-600">
-                    Manage users and pushtag mappings via the Go Backend API.
                 </p>
                 
                 <form onSubmit={handleAddUser} className="space-y-4 p-4 border rounded-xl mb-6 bg-gray-50">
@@ -523,7 +522,6 @@ const AdminPage = ({ userId, token }) => {
                     </table>
                 </div>
                 <p className="mt-4 text-xs text-gray-400 text-center">
-                    User ID used for auditing: <span className="font-mono text-gray-500 break-all">{userId}</span>
                 </p>
             </div>
 
@@ -531,7 +529,6 @@ const AdminPage = ({ userId, token }) => {
             <div className="w-full bg-white/80 backdrop-blur p-8 rounded-2xl shadow-xl border border-white/60">
                 <div className="flex items-end justify-between gap-4 mb-6">
                     <h3 className="text-2xl font-extrabold text-indigo-700 tracking-tight">ELF Library Management</h3>
-                    <span className="text-xs text-gray-500">Manage build-id mapped ELF artifacts</span>
                 </div>
 
                 <form onSubmit={handleFetchElfByURL} className="space-y-4 p-4 border rounded-xl mb-6 bg-gray-50">
